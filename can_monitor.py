@@ -1,15 +1,16 @@
 #!/usr/bin/python
 
-import argparse
 import curses
 import sys
 import threading
 import traceback
+import struct
+import sched, time
 
 import can
 
 should_redraw = threading.Event()
-stop_bus = threading.Event()
+stop_reading = threading.Event()
 
 can_messages = {}
 can_messages_lock = threading.Lock()
@@ -17,94 +18,67 @@ can_messages_lock = threading.Lock()
 thread_exception = None
 g_stdscr = None
 
-CLEAR_DICT_ARB_ID = 0x777
-CLEAR_DICT_DATA_LEN = 8
-CLEAR_DICT_DATA = [7, 7, 7, 7, 7, 7, 7, 7]
 BLACKLIST = []
-WHITELIST = []
 
-def data_is_special_clear_frame(arb_id, data_len, data):
-    if arb_id != CLEAR_DICT_ARB_ID:
-        return False
+STATIONBASEID = 120
+VWPARTNERID = 40
 
-    if data_len != CLEAR_DICT_DATA_LEN:
-        return False
+class Interrupt():
+    def __init__(self, period):
+        self.next_t = time.time()
+        self.done=False
+        self.period = period
+        self._run()
 
-    for i in range(CLEAR_DICT_DATA_LEN):
-        if CLEAR_DICT_DATA[i] != data[i]:
-            return False
+    def _run(self):
+        # Clear can messages array
+        with can_messages_lock:
+            can_messages.clear()
+        should_redraw.set()
 
-    return True
-
-def read_bus(bus_device):
-    """Read data from `bus_device` until the next newline character."""
-    message = bus.recv(0.2)
-    while True:
-        if message:
-            break
-        message = bus.recv(0.2)
-
-    try:
-        string = "{}:ID={}:LEN={}".format("RX", message.arbitration_id, message.dlc)
-        for x in range(message.dlc):
-            string += ":{:02x}".format(message.data[x])
-
-    except Exception as e:
-        print(e)
-    return string
+        self.next_t+=self.period
+        if not self.done:
+            threading.Timer( self.next_t - time.time(), self._run).start()
+    
+    def stop(self):
+        self.done=True
 
 
-def bus_run_loop(bus_device):
+def bus_run_loop(rx_bus,tx_bus):
     """Background thread for serial reading."""
     try:
-        while not stop_bus.is_set():
-            line = read_bus(bus_device)
+        while not stop_reading.is_set():
+            msg = rx_bus.recv(0.2)
+            if msg:
+                id, dlc, data = msg.arbitration_id, msg.dlc, msg.data
 
-            # Sample frame from Arduino: FRAME:ID=246:LEN=8:8E:62:1C:F6:1E:63:63:20
-            # Split it into an array (e.g. ['FRAME', 'ID=246', 'LEN=8', '8E', '62', '1C', 'F6', '1E', '63', '63', '20'])
-            frame = line.split(':')
-
-            try:
-                frame_id = int(frame[1][3:])  # get the ID from the 'ID=246' string
-
-                if WHITELIST != [] and frame_id != CLEAR_DICT_ARB_ID and frame_id not in WHITELIST:
-                    continue
-                elif BLACKLIST != [] and frame_id != CLEAR_DICT_ARB_ID and frame_id in BLACKLIST:
+                if id in BLACKLIST:
                     continue
 
-                frame_length = int(frame[2][4:])  # get the length from the 'LEN=8' string
-
-                data = [int(byte, 16) for byte in frame[3:]]  # convert the hex strings array to an integer array
-                data = [byte for byte in data if byte >= 0 and byte <= 255]  # sanity check
-
-
-                if len(data) != frame_length:
-                    # Wrong frame length or invalid data
-                    continue
-
-                # Clear the dictionnary if a special message is received
-                if data_is_special_clear_frame(frame_id, frame_length, data):
-                    with can_messages_lock:
-                        global can_messages
-                        can_messages = {}
-                        should_redraw.set()
-                        win = init_window(g_stdscr)
-                        continue
-
-                # Add the frame to the can_messages dict and tell the main thread to refresh its content
                 with can_messages_lock:
-                    can_messages[frame_id] = data
-                    should_redraw.set()
-            except Exception as e:
-                print(e)
-                # Invalid frame
-                continue
+                    can_messages[id] = data
+                    should_redraw.set()   
+
+                if id == VWPARTNERID:
+                    msg_bytearray = [byte for byte in data]
+                    msg_bytearray.reverse()
+                    angle = 0
+                    if len(msg_bytearray) == 4:
+                        angle = struct.unpack('f', bytearray(msg_bytearray))[0]
+                    
+                    torque = 0
+                    if angle < 0:
+                        torque = -500*angle
+
+                    send_msg_bytearray = bytearray(struct.pack("f", torque))  
+                    send_msg_bytearray.reverse()
+                    send_msg = can.Message(arbitration_id=STATIONBASEID+1, data=send_msg_bytearray, is_extended_id=False)
+                    tx_bus.send(send_msg)
+                
+        stop_reading.wait()
+
     except:
-        if not stop_bus.is_set():
-            # Only log exception if we were not going to stop the thread
-            # When quitting, the main thread calls close() on the serial device
-            # and read() may throw an exception. We don't want to display it as
-            # we're stopping the script anyway
+        if not stop_reading.is_set():
             global thread_exception
             thread_exception = sys.exc_info()
 
@@ -140,71 +114,64 @@ def main(stdscr, bus_thread):
         if should_redraw.is_set():
             max_y, max_x = win.getmaxyx()
 
-            column_width = 70
-            id_column_start = 2
-            id_padding = 14
-            bytes_column_start = 15 + id_padding
-            text_column_start = 45 + id_padding
+            padding = 5
+            id_width = 5
+            bytes_width = 25
+            float_width = 10
+            active_width = 10
+
+            id_column_start = padding
+            bytes_column_start = id_column_start + id_width + padding 
+            float_column_start = bytes_column_start + bytes_width + padding
+            active_column_start = float_column_start + float_width + padding
 
             # Compute row/column counts according to the window size and borders
             row_start = 3
             lines_per_column = max_y - (1 + row_start)
-            num_columns = int((max_x - 2) / column_width)
 
             # Setting up column headers
-            for i in range(0, num_columns):
-                win.addstr(1, id_column_start + i * column_width, 'ID')
-                win.addstr(1, bytes_column_start + i * column_width, 'Bytes')
-                win.addstr(1, text_column_start + i * column_width, 'Text')
+            win.addstr(1, id_column_start, 'ID'.rjust(id_width))
+            win.addstr(1, bytes_column_start, 'Bytes'.ljust(bytes_width))
+            win.addstr(1, float_column_start, 'Float'.rjust(float_width))
 
-            win.addstr(3, id_column_start, "Press 'q' to quit")
+            row = row_start 
 
-            row = row_start + 2  # The first column starts a bit lower to make space for the 'press q to quit message'
-            current_column = 0
-
-            # Make sure we don't read the can_messages dict while it's being written to in the serial thread
+            # Don't read can_messages while being written to in serial thread
             with can_messages_lock:
-                for frame_id in sorted(can_messages.keys()):
+                for frame_id in sorted(list(can_messages)):
                     msg = can_messages[frame_id]
 
                     # convert the bytes array to an hex string (separated by spaces)
                     msg_bytes = ' '.join('%02X' % byte for byte in msg)
 
-                    # try to make an ASCII representation of the bytes
-                    # nonprintable characters are replaced by '?'
-                    # and spaces are replaced by '.'
-                    msg_str = ''
-                    for byte in msg:
-                        char = chr(byte)
-                        if char == '\0':
-                            msg_str = msg_str + '.'
-                        elif ord(char) < 32 or ord(char) > 126:
-                            msg_str = msg_str + '?'
-                        else:
-                            msg_str = msg_str + char
+                    # convert the bytes array to float
+                    msg_bytearray = [byte for byte in msg]
+                    msg_bytearray.reverse()
+                    if len(msg_bytearray) == 4:
+                        msg_float = struct.unpack('f', bytearray(msg_bytearray))[0]
+                    else:
+                        msg_float = 0
 
-                    # print frame ID in decimal and hex
-                    #win.addstr(row, id_column_start + current_column * column_width, '%s' % str(frame_id).ljust(8))
-                    win.addstr(row, id_column_start + id_padding + current_column * column_width, '{:08x}'.format(frame_id))
-
-                    # print frame bytes
-                    win.addstr(row, bytes_column_start + current_column * column_width, msg_bytes.ljust(23))
-
-                    # print frame text
-                    win.addstr(row, text_column_start + current_column * column_width, msg_str.ljust(8))
+                    # Print frame ID
+                    win.addstr(row, id_column_start, str(frame_id).rjust(id_width))
+                    # Print frame bytes
+                    win.addstr(row, bytes_column_start, msg_bytes.ljust(bytes_width))
+                    # Print frame in float
+                    win.addstr(row, float_column_start, f'{msg_float:5.2f}'.rjust(float_width))
 
                     row = row + 1
-
                     if row >= lines_per_column + row_start:
-                        # column full, switch to the next one
                         row = row_start
-                        current_column = current_column + 1
 
-                        if current_column >= num_columns:
-                            break
+            # Fill rest of window with nothing
+            while row < max_y-2:
+                win.addstr(row, id_column_start, "".rjust(70))
+                row+=1
+
+            # Add quit message
+            win.addstr(max_y-2, 2, "Press 'q' to quit")
 
             win.refresh()
-
             should_redraw.clear()
 
         c = stdscr.getch()
@@ -214,30 +181,39 @@ def main(stdscr, bus_thread):
             win = init_window(stdscr)
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Process CAN data from a socket-can device.')
 
-    bus_device = None
-    bus_thread = None
+    rx_bus_device = None
+    rx_bus_thread = None
 
     try:
-        bus = can.interface.Bus(channel='0', bitrate=500000, bustype='kvaser')
+        rx_bus = can.interface.Bus(channel='0', bitrate=500000, bustype='kvaser')
+        tx_bus = can.interface.Bus(channel='1', bitrate=500000, bustype='kvaser')
 
         # Start the bus reading background thread
-        bus_thread = threading.Thread(target=bus_run_loop, args=(bus,))
-        bus_thread.start()
+        rx_bus_thread = threading.Thread(target=bus_run_loop, args=(rx_bus,tx_bus))
+        rx_bus_thread.start()
+
+        # clear_thread = threading.Thread(target=clear_data)
+        # clear_thread.start()
+
+        
+        isr=Interrupt(period = 0.3)
+
 
         # Make sure to draw the UI the first time even if there is no data
         should_redraw.set()
 
         # Start the main loop
-        curses.wrapper(main, bus_thread)
+        curses.wrapper(main, rx_bus_thread)
 
     finally:
         # Cleanly stop bus thread before exiting
-        if bus_thread:
-            stop_bus.set()
+        if rx_bus_thread:
+            stop_reading.set()
 
-            bus_thread.join()
+            rx_bus_thread.join()
+
+            isr.stop()
 
             # If the thread returned an exception, print it
             if thread_exception:
