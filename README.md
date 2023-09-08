@@ -7,7 +7,9 @@ This repo contains:
 These scripts should help the students test and debug their code.
 
 ## Usage
-Install the dependencies (preferably in a virtualenv)
+Install the linux drivers, follow the instructions on this [link](https://www.kvaser.com/canlib-webhelp/section_install_linux.html)
+
+Install pip dependencies
 
     pip install -r requirements.txt
 
