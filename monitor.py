@@ -5,7 +5,7 @@ import sys
 import threading
 import traceback
 import struct
-import sched, time
+import time
 
 import can
 

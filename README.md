@@ -6,27 +6,28 @@ This repo contains:
 
 These scripts should help the students test and debug their code.
 
-## Usage
-Install the linux drivers, follow the instructions on this [link](https://www.kvaser.com/canlib-webhelp/section_install_linux.html)
+This is a fork from https://github.com/alexandreblin/python-can-monitor. The scripts use 
 
-Install pip dependencies
+## Usage
+- Install the linux drivers, follow the instructions on this [link](https://www.kvaser.com/canlib-webhelp/section_install_linux.html).
+
+- Install pip dependencies
 
     pip install -r requirements.txt
 
-Launch the script
+- Connect two 'Kvaser Leaf Light v2' dongles, one for receiving and one for sending messages.
 
-    python
+- Check your drivers are installed and recognising your dongles correctly by running:
+    python list_channels.py
 
-Press Q at any time to exit the script.
+You should see the two dongles on channel 0 and 1
 
-Sending a special frame (right now, `777#0707070707070707`) will reset the screen
-Adding arbitration ids to BLACKLIST or WHITELIST can allow you to select what
-you want and don't want to see when there are too many messages.
+- Set the virtual wall parter A's id (VWPARTNERID) in 'can_monitor.py'. Your id is 120.
 
-## Example
+- Launch the script
+    python monitor.py
 
-    ./canmonitor.py vcan0
+Press 'q' at any time to exit the script.
 
-![Screenshot](http://i.imgur.com/1nqCQKz.png)
 
 
