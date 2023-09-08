@@ -15,7 +15,7 @@ Parts of this script is forked from https://github.com/alexandreblin/python-can-
 
 - Connect two *Kvaser Leaf Light v2* dongles, one for receiving and one for sending can messages.
 
-- Check your drivers are installed and recognising your dongles correctly by running:
+- Check your drivers are installed correctly and recognise your dongles by running:
 
         python list_channels.py
 
