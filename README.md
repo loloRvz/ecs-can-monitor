@@ -29,6 +29,3 @@ Launch the script:
     python monitor.py
 
 Press 'q' at any time to exit.
-
-
-
