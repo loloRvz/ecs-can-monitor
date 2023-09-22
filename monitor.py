@@ -20,10 +20,12 @@ g_stdscr = None
 
 BLACKLIST = []
 
-STATIONBASEID = 120
-VWPARTNERID = 40
+STATIONBASEID = 200
+VWPARTNERID = 30
 
-class Interrupt():
+_torque = 0
+
+class ClearInterrupt():
     def __init__(self, period):
         self.next_t = time.time()
         self.done=False
@@ -43,6 +45,26 @@ class Interrupt():
     def stop(self):
         self.done=True
 
+class TxTorqueInterrupt():
+    def __init__(self, period, tx_bus):
+        self.next_t = time.time()
+        self.done=False
+        self.period = period
+        self.tx_bus = tx_bus
+        self._run()
+
+    def _run(self):
+        send_msg_bytearray = bytearray(struct.pack("f", _torque))  
+        send_msg_bytearray.reverse()
+        send_msg = can.Message(arbitration_id=STATIONBASEID+1, data=send_msg_bytearray, is_extended_id=False)
+        self.tx_bus.send(send_msg)
+        
+        self.next_t+=self.period
+        if not self.done:
+            threading.Timer( self.next_t - time.time(), self._run).start()
+    
+    def stop(self):
+        self.done=True
 
 def bus_run_loop(rx_bus,tx_bus):
     """Background thread for serial reading."""
@@ -66,14 +88,11 @@ def bus_run_loop(rx_bus,tx_bus):
                     if len(msg_bytearray) == 4:
                         angle = struct.unpack('f', bytearray(msg_bytearray))[0]
                     
-                    torque = 0
+                    global _torque
                     if angle < 0:
-                        torque = -500*angle
-
-                    send_msg_bytearray = bytearray(struct.pack("f", torque))  
-                    send_msg_bytearray.reverse()
-                    send_msg = can.Message(arbitration_id=STATIONBASEID+1, data=send_msg_bytearray, is_extended_id=False)
-                    tx_bus.send(send_msg)
+                        _torque = -500*angle
+                    else:
+                        _torque = 0
                 
         stop_reading.wait()
 
@@ -186,6 +205,7 @@ if __name__ == '__main__':
     rx_bus_thread = None
 
     try:
+        # Start Bus interfaces
         rx_bus = can.interface.Bus(channel='0', bitrate=500000, bustype='kvaser')
         tx_bus = can.interface.Bus(channel='1', bitrate=500000, bustype='kvaser')
 
@@ -193,12 +213,10 @@ if __name__ == '__main__':
         rx_bus_thread = threading.Thread(target=bus_run_loop, args=(rx_bus,tx_bus))
         rx_bus_thread.start()
 
-        # clear_thread = threading.Thread(target=clear_data)
-        # clear_thread.start()
+        # Clear old messages every 300ms
+        clear_isr=ClearInterrupt(period = 0.3)
 
-        
-        isr=Interrupt(period = 0.3)
-
+        tx_isr = TxTorqueInterrupt(period = 0.001, tx_bus = tx_bus)
 
         # Make sure to draw the UI the first time even if there is no data
         should_redraw.set()
@@ -213,7 +231,8 @@ if __name__ == '__main__':
 
             rx_bus_thread.join()
 
-            isr.stop()
+            clear_isr.stop()
+            tx_isr.stop()
 
             # If the thread returned an exception, print it
             if thread_exception:
